@@ -23,10 +23,13 @@ python3 apply.py --chromium-src ~/chromium/src --revert     # undo
 Add `--emit-patch env-fp.patch` to also write a real `git diff` of the result,
 which is what you want for archiving or code review.
 
-The applier sniffs two `base/` APIs that were renamed recently
-(`Environment::GetVar`'s signature and `base::Value::Dict` vs `base::DictValue`)
-and generates whichever spelling your tree uses, so it works across a range of
-milestones.
+The applier sniffs three APIs that were renamed recently
+(`Environment::GetVar`'s signature, `base::Value::Dict` vs `base::DictValue`,
+and `WTF::String::FromUTF8` vs `FromUtf8`) and generates whichever spelling your
+tree uses, so it works across a range of milestones. `FromUtf8` also lost its
+string overload on recent trees, leaving only `base::span<const uint8_t>`; where
+that is the case the applier wraps the argument in `base::as_byte_span()`, since
+a `std::string` will not convert on its own.
 
 Then build normally:
 

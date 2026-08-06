@@ -50,10 +50,12 @@ UNMASKED_REPLACEMENT = """    case WebGLDebugRendererInfo::kUnmaskedRendererWebg
         // ENV_FP: substitute the value, keep the extension gate intact.
         const std::optional<std::string>& env_renderer =
             blink::env_fingerprint::WebglRenderer();
+        if (env_renderer.has_value()) {
+          return WebGLAny(script_state,
+                          String::FromUTF8(*env_renderer));
+        }
         return WebGLAny(script_state,
-                        env_renderer.has_value()
-                            ? String::FromUTF8(*env_renderer)
-                            : String(ContextGL()->GetString(GL_RENDERER)));
+                        String(ContextGL()->GetString(GL_RENDERER)));
       }
       SynthesizeGLError(
           GL_INVALID_ENUM, "getParameter",
@@ -64,10 +66,12 @@ UNMASKED_REPLACEMENT = """    case WebGLDebugRendererInfo::kUnmaskedRendererWebg
         // ENV_FP: substitute the value, keep the extension gate intact.
         const std::optional<std::string>& env_vendor =
             blink::env_fingerprint::WebglVendor();
+        if (env_vendor.has_value()) {
+          return WebGLAny(script_state,
+                          String::FromUTF8(*env_vendor));
+        }
         return WebGLAny(script_state,
-                        env_vendor.has_value()
-                            ? String::FromUTF8(*env_vendor)
-                            : String(ContextGL()->GetString(GL_VENDOR)));
+                        String(ContextGL()->GetString(GL_VENDOR)));
       }
       SynthesizeGLError(
           GL_INVALID_ENUM, "getParameter",

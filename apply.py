@@ -83,10 +83,20 @@ def main() -> int:
     print(f"Target: {src}  (Chrome {describe_version(src)})")
 
     ctx = detect_api_flavors(src)
+    from_utf8 = f"String::{ctx['from_utf8_name']}"
+    if ctx["from_utf8_needs_span"]:
+        from_utf8 += "(span)"
     print("Detected APIs: "
           f"GetVar={'optional' if ctx['optional_getvar'] else 'out-param'}, "
           f"values={ctx['dict_type']}, "
-          f"JSONReader::ReadDict={'yes' if ctx['has_read_dict'] else 'no'}")
+          f"JSONReader::ReadDict={'yes' if ctx['has_read_dict'] else 'no'}, "
+          f"utf8={from_utf8}")
+
+    if ctx["from_utf8_needs_span"] and not ctx["has_as_byte_span"]:
+        fail("this tree's String::" + ctx["from_utf8_name"] + " only accepts a "
+             "byte span, but base::as_byte_span() is not in "
+             "base/containers/span.h; teach spell_from_utf8() in "
+             "edits/__init__.py how to convert on this milestone")
 
     edits = collect_edits(ctx)
 

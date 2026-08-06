@@ -6,6 +6,7 @@ carries the API flavours detected in the target checkout (see
 generated code has to match whichever spelling the tree actually uses.
 """
 
+import dataclasses
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,10 @@ def detect_api_flavors(src: Path) -> dict:
     ``base::Value::Dict``; current main uses ``std::optional<std::string>
     GetVar(...)`` and ``base::DictValue``.  Guessing wrong produces a build
     error, so read it out of the tree instead.
+
+    ``WTF::String::FromUTF8`` is sniffed the same way: it was renamed to
+    ``FromUtf8``, and on trees where the byte-span overload is the only one
+    left a ``std::string`` argument no longer converts and has to be wrapped.
     """
     ctx = {}
 
@@ -58,7 +63,47 @@ def detect_api_flavors(src: Path) -> dict:
     json_h = (src / "base" / "json" / "json_reader.h").read_text(errors="replace")
     ctx["has_read_dict"] = "ReadDict(" in json_h
 
+    wtf_string_h = (src / "third_party" / "blink" / "renderer" / "platform" /
+                    "wtf" / "text" / "wtf_string.h").read_text(errors="replace")
+    declarations = _FROM_UTF8_DECL.findall(wtf_string_h)
+    if not declarations:
+        raise RuntimeError(
+            "no String::FromUtf8/FromUTF8 declaration found in "
+            "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+        )
+    ctx["from_utf8_name"] = declarations[0][0]
+    # An overload taking a string-like parameter accepts a std::string as-is.
+    # Where the byte-span overload is the only one, the argument has to be
+    # converted explicitly -- std::string does not convert to a span of
+    # uint8_t, because char* does not convert to unsigned char*.
+    ctx["from_utf8_needs_span"] = not any(
+        "string_view" in parameters or "std::string" in parameters
+        for _, parameters in declarations
+    )
+
+    span_h = (src / "base" / "containers" / "span.h").read_text(errors="replace")
+    ctx["has_as_byte_span"] = "as_byte_span(" in span_h
+
     return ctx
+
+
+# The edit modules are written against one canonical spelling; every call is
+# rewritten below to whatever the target tree actually provides. Arguments are
+# simple dereferences, so a paren-free match is enough.
+_FROM_UTF8_DECL = re.compile(r"static\s+String\s+(FromUtf8|FromUTF8)\s*\(([^)]*)\)")
+_FROM_UTF8_CALL = re.compile(r"String::FromUTF8\(([^()]*)\)")
+
+
+def spell_from_utf8(text: str, ctx: dict) -> str:
+    """Rewrite ``String::FromUTF8(x)`` into this tree's spelling of it."""
+    name = ctx["from_utf8_name"]
+    if name == "FromUTF8" and not ctx["from_utf8_needs_span"]:
+        return text
+    if ctx["from_utf8_needs_span"]:
+        replacement = f"String::{name}(base::as_byte_span(\\1))"
+    else:
+        replacement = f"String::{name}(\\1)"
+    return _FROM_UTF8_CALL.sub(replacement, text)
 
 
 def collect_edits(ctx: dict) -> list:
@@ -66,5 +111,10 @@ def collect_edits(ctx: dict) -> list:
 
     out = []
     for module in (shared, ua, navigator, webgl, webgpu, media, propagate):
-        out.extend(module.edits(ctx))
+        for edit in module.edits(ctx):
+            out.append(dataclasses.replace(
+                edit,
+                replacement=spell_from_utf8(edit.replacement, ctx),
+                marker=spell_from_utf8(edit.marker, ctx),
+            ))
     return out
