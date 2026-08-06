@@ -128,8 +128,13 @@ SOURCE_TAIL_ANCHOR = """}  // namespace switches
 def _read_env_body(ctx: dict) -> str:
     """base::Environment::GetVar changed shape; emit whichever the tree has."""
     if ctx["optional_getvar"]:
+        # GetVar takes base::cstring_view, which converts from a string literal
+        # array or a std::string but NOT from a decayed `const char*` -- and
+        # env_name is a pointer parameter by the time it gets here. Wrapping in
+        # std::string picks the constructor that exists, and also compiles
+        # against the older std::string_view overload.
         return """  base::Environment environment;
-  std::optional<std::string> value = environment.GetVar(env_name);
+  std::optional<std::string> value = environment.GetVar(std::string(env_name));
   if (value.has_value() && !value->empty()) {
     return value;
   }"""
