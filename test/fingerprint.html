@@ -307,6 +307,15 @@ reportHints();
 reportWebgpu();
 reportWorker();
 reportDevices();
+
+// Nothing clicks the button in a headless run, and without the permission
+// grant enumerateDevices() returns one blank entry per kind rather than the
+// spoofed list. Loading with ?grant=1 (alongside
+// --use-fake-ui-for-media-stream, which accepts the prompt) takes the same
+// path the button does.
+if (new URLSearchParams(location.search).has("grant")) {
+  document.getElementById("grant").click();
+}
 </script>
 </body>
 </html>

@@ -175,6 +175,40 @@ that are easy to introduce:
 The first thing to check is that an **unconfigured** run reports stock values
 everywhere. The patch must be inert by default.
 
+### On a headless server
+
+Serve the page rather than opening it as `file://`, so that `localhost` gives
+you a secure context and the client hints actually go out:
+
+```sh
+python3 test/serve.py 8000 &
+CHROME_BIN=/path/to/chrome ./run.sh profiles/win-nvidia.env \
+  --headless --no-sandbox --enable-unsafe-swiftshader \
+  --use-fake-ui-for-media-stream --use-fake-device-for-media-stream \
+  --virtual-time-budget=8000 --screenshot=/tmp/fp.png --window-size=1280,3200 \
+  'http://localhost:8000/fingerprint.html?grant=1'
+```
+
+`?grant=1` requests camera and microphone on load, which
+`--use-fake-ui-for-media-stream` then accepts. Without it nothing clicks the
+button, and an ungranted page sees one blank entry per device kind instead of
+the spoofed list.
+
+Then `scp` the PNG back. Swap `--screenshot=…` for `--dump-dom` to read the
+result as text over SSH instead.
+
+`serve.py` prints the `User-Agent` and `Sec-CH-UA*` headers of each navigation,
+which is the only way to see what the browser actually sent; load the page
+twice, as the high-entropy hints only arrive on the second request. The flags
+matter: without `--enable-unsafe-swiftshader` a GPU-less instance has no WebGL
+context at all and the WebGL section reads as failure when it is merely absent.
+
+The one thing to avoid is tunnelling port 8000 to your laptop and opening it
+there. That renders the page in your local browser and reports your local
+machine — the patched binary has to be the one loading the page. For an
+interactive session, forward `--remote-debugging-port=9222` instead and drive
+the remote browser from `chrome://inspect`.
+
 ## Design notes
 
 Reading happens once per process, cached in a `base::NoDestructor`, because
@@ -227,6 +261,7 @@ edits/propagate.py    browser to child-process switch forwarding
 env.example           a coherent Windows/NVIDIA profile
 test/fingerprint.html verification page
 test/capture-profile.html  build a profile from a real machine
+test/serve.py         serve the test pages and log the identity headers
 ```
 
 ## Building an accurate profile
