@@ -64,6 +64,43 @@ setting it.
 
 See `env.example` for a complete, coherent profile.
 
+### When the values are read
+
+At browser startup, not at build time. Only the variable *names* are compiled
+in; each value is read with `getenv` the first time it is needed. Build once,
+then change the values as often as you like — a different profile is just a
+different launch.
+
+Each browser process latches its values on startup and caches them, so changing
+a variable does not affect an already-running Chrome. Relaunch to pick up a
+change. The flip side is that two Chrome instances launched with different
+variables run side by side quite happily, each with its own identity.
+
+```sh
+./run.sh profiles/win-nvidia.env            # one identity
+./run.sh profiles/mac-m3.env                # another, at the same time
+```
+
+`run.sh` sources the profile, gives each one its own `--user-data-dir` (so
+permission grants and cookies do not leak between them), prints what it set, and
+execs Chrome. Set `CHROME_BIN` if your binary is not at
+`~/chromium/src/out/Release/chrome`. Extra arguments are passed through:
+
+```sh
+./run.sh profiles/win-nvidia.env https://example.com
+CHROME_BIN=/opt/chromium/chrome ./run.sh profiles/mac-m3.env --incognito
+```
+
+Nothing requires the launcher — it is a convenience over setting the variables
+yourself:
+
+```sh
+CHROME_ENV_PLATFORM=Win32 CHROME_ENV_HARDWARE_CONCURRENCY=8 \
+  out/Release/chrome --user-data-dir=/tmp/p1
+```
+
+Copy `env.example` to `profiles/<name>.env` to add your own.
+
 ### Derived values
 
 `navigator.platform` and the UA client hints use different vocabularies —
@@ -175,6 +212,8 @@ the extension is disabled would itself be a detectable difference.
 
 ```
 apply.py              anchored applier
+run.sh                launch a build with a profile
+profiles/             ready-made profiles (win-nvidia, mac-m3/m4/m5)
 edits/shared.py       the config reader appended to blink's switches.{h,cc}
 edits/ua.py           user agent + client hints
 edits/navigator.py    platform, vendor, hardwareConcurrency
@@ -184,7 +223,30 @@ edits/media.py        enumerateDevices
 edits/propagate.py    browser to child-process switch forwarding
 env.example           a coherent Windows/NVIDIA profile
 test/fingerprint.html verification page
+test/capture-profile.html  build a profile from a real machine
 ```
+
+## Building an accurate profile
+
+A profile is only useful if it describes a machine that actually exists. A core
+count or GPU string that matches no real configuration is *more* identifying
+than not spoofing at all, so prefer captured values over plausible ones.
+
+Open `test/capture-profile.html` in **stock Chrome on the machine you want to
+imitate**, grant camera and microphone access, and click Capture. It writes a
+ready-to-save profile with that machine's real UA, platform, core count, WebGL
+and WebGPU strings, and device list.
+
+Two things it handles that hand-editing gets wrong: it unwraps the driver string
+from inside `WebGL 1.0 (…)`, since the patch sets the inner part only; and it
+replaces the captured `deviceId` values, which are per-origin HMACs and
+meaningless to copy, with stable readable ids while preserving which devices
+share a group.
+
+The bundled `mac-m4.env` and `mac-m5.env` carry `[VERIFY]` markers on fields
+that are reconstruction rather than observed output — chiefly the macOS
+version, the ANGLE build hash, and the WebGPU architecture token. Replace them
+with captured values before using those profiles in anger.
 
 To adjust an anchor after a rebase, edit the relevant `edits/*.py`; the applier
 tells you which one when a match fails.

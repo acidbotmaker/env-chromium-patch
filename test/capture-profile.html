@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Capture a fingerprint profile</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0 auto;
+         padding: 2rem 1.5rem; max-width: 58rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  p.lede { margin: 0 0 1.25rem; opacity: .75; }
+  ol { padding-left: 1.2rem; }
+  li { margin-bottom: .35rem; }
+  textarea { width: 100%; min-height: 30rem; font-family: ui-monospace,
+             SFMono-Regular, Menlo, monospace; font-size: 12px; padding: .75rem;
+             border-radius: 4px; box-sizing: border-box; }
+  button { font: inherit; padding: .45rem .9rem; margin: 0 .4rem .75rem 0; }
+  .note { padding: .6rem .8rem; border-left: 3px solid #ef6c00;
+          background: color-mix(in srgb, #ef6c00 10%, transparent);
+          border-radius: 4px; margin-bottom: 1.25rem; }
+  .ok { border-color: #2e7d32; background: color-mix(in srgb, #2e7d32 8%, transparent); }
+</style>
+</head>
+<body>
+
+<h1>Capture a fingerprint profile</h1>
+<p class="lede">
+  Reads this machine's real values and writes them out as a profile for
+  env-chromium-patch.
+</p>
+
+<div class="note">
+  Run this in <strong>stock Chrome on the machine you want to imitate</strong>,
+  not in the patched build — a patched build would just echo back whatever it
+  was already configured with.
+</div>
+
+<ol>
+  <li>Click <em>Grant camera + microphone</em> so device labels are readable.
+      Without permission the labels come back empty and the media section will
+      be left as a placeholder.</li>
+  <li>Click <em>Capture</em>.</li>
+  <li>Save the output as <code>profiles/&lt;name&gt;.env</code> in the patch repo.</li>
+</ol>
+
+<button id="grant">Grant camera + microphone</button>
+<button id="capture">Capture</button>
+<button id="copy">Copy to clipboard</button>
+<div id="status"></div>
+
+<textarea id="out" spellcheck="false" placeholder="Output appears here."></textarea>
+
+<script>
+const statusEl = document.getElementById("status");
+const outEl = document.getElementById("out");
+
+function setStatus(message, ok) {
+  statusEl.innerHTML = message
+    ? `<div class="note ${ok ? "ok" : ""}">${message}</div>` : "";
+}
+
+// Values are emitted inside single quotes, so any embedded single quote has to
+// close, escape, and reopen the string -- the standard POSIX shell dance.
+const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+function readWebgl() {
+  const gl = document.createElement("canvas").getContext("webgl");
+  if (!gl) return null;
+  const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    renderer: debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : null,
+    vendor: debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : null,
+    // GL_VERSION is reported as "WebGL 1.0 (<driver string>)"; the patch sets
+    // the inner part only, so unwrap the outer layer here.
+    version: unwrap(gl.getParameter(gl.VERSION), /^WebGL 1\.0 \((.*)\)$/),
+    glsl: unwrap(gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+                 /^WebGL GLSL ES 1\.0 \((.*)\)$/),
+  };
+}
+
+function unwrap(value, pattern) {
+  const match = String(value ?? "").match(pattern);
+  return match ? match[1] : value;
+}
+
+async function readWebgpu() {
+  if (!navigator.gpu) return null;
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return null;
+    const info = adapter.info || await adapter.requestAdapterInfo?.();
+    return info ? { vendor: info.vendor, architecture: info.architecture,
+                    description: info.description } : null;
+  } catch { return null; }
+}
+
+async function readDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return null;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const buckets = { audioinput: [], videoinput: [], audiooutput: [] };
+  let anyLabel = false;
+  for (const device of devices) {
+    if (!(device.kind in buckets)) continue;
+    if (device.label) anyLabel = true;
+    const entry = {
+      // The deviceId here is already an HMAC scoped to this page's origin, so
+      // it is useless to copy. Emit a stable readable id instead and let the
+      // patched build hash it for whatever origin it is asked about.
+      deviceId: device.deviceId === "default" || device.deviceId === "communications"
+        ? device.deviceId
+        : `${device.kind}-${buckets[device.kind].length}`,
+      label: device.label || "",
+      groupId: device.groupId ? `grp-${hashish(device.groupId)}` : "",
+    };
+    buckets[device.kind].push(entry);
+  }
+  return { buckets, anyLabel };
+}
+
+// Collapse an opaque per-origin group hash into a short stable token, so
+// devices that really do share a group still share one in the profile.
+const groupTokens = new Map();
+function hashish(groupId) {
+  if (!groupTokens.has(groupId)) groupTokens.set(groupId, groupTokens.size + 1);
+  return groupTokens.get(groupId);
+}
+
+async function capture() {
+  setStatus("Capturing…");
+  const webgl = readWebgl();
+  const webgpu = await readWebgpu();
+  const media = await readDevices();
+
+  let hints = null;
+  if (navigator.userAgentData) {
+    try {
+      hints = await navigator.userAgentData.getHighEntropyValues(
+        ["platform", "platformVersion"]);
+    } catch { /* leave null */ }
+  }
+
+  const lines = [];
+  const add = (name, value) => lines.push(`${name}=${shellQuote(value)}`);
+  const comment = text => lines.push(`# ${text}`);
+
+  lines.push(`# Captured from a live machine on ${new Date().toISOString().slice(0, 10)}.`);
+  comment(`source UA: ${navigator.userAgent}`);
+  lines.push("");
+  lines.push("# --- identity ---");
+  add("CHROME_ENV_UA", navigator.userAgent);
+  add("CHROME_ENV_PLATFORM", navigator.platform);
+  if (hints?.platformVersion) {
+    add("CHROME_ENV_UA_PLATFORM_VERSION", hints.platformVersion);
+  } else {
+    comment("CHROME_ENV_UA_PLATFORM_VERSION unavailable (no client hints)");
+  }
+  add("CHROME_ENV_VENDOR", navigator.vendor);
+  add("CHROME_ENV_HARDWARE_CONCURRENCY", navigator.hardwareConcurrency);
+
+  lines.push("");
+  lines.push("# --- GPU ---");
+  if (webgl?.vendor) {
+    add("CHROME_ENV_WEBGL_VENDOR", webgl.vendor);
+    add("CHROME_ENV_WEBGL_RENDERER", webgl.renderer);
+    add("CHROME_ENV_WEBGL_VERSION", webgl.version);
+    add("CHROME_ENV_WEBGL_SHADING_LANGUAGE_VERSION", webgl.glsl);
+  } else {
+    comment("WEBGL_debug_renderer_info unavailable — no GPU strings captured.");
+    comment("Check chrome://gpu, or make sure hardware acceleration is on.");
+  }
+  if (webgpu) {
+    add("CHROME_ENV_WEBGPU_VENDOR", webgpu.vendor ?? "");
+    add("CHROME_ENV_WEBGPU_ARCHITECTURE", webgpu.architecture ?? "");
+    if (webgpu.description) {
+      add("CHROME_ENV_WEBGPU_DESCRIPTION", webgpu.description);
+    }
+  } else {
+    comment("WebGPU unavailable — no adapter info captured.");
+  }
+
+  lines.push("");
+  lines.push("# --- media devices ---");
+  if (media && media.anyLabel) {
+    add("CHROME_ENV_MEDIA_DEVICES", JSON.stringify(media.buckets, null, 2));
+  } else {
+    comment("Device labels were empty — grant camera/microphone and re-capture.");
+    comment("Until then this profile leaves enumerateDevices() untouched.");
+  }
+
+  outEl.value = lines.join("\n") + "\n";
+
+  const warnings = [];
+  if (!webgl?.vendor) warnings.push("GPU strings missing");
+  if (!media?.anyLabel) warnings.push("media labels missing");
+  if (!hints?.platformVersion) warnings.push("platform version missing");
+  setStatus(
+    warnings.length
+      ? `Captured with gaps: ${warnings.join(", ")}. Fill these in by hand or re-run after granting permission.`
+      : "Captured everything. Save as profiles/&lt;name&gt;.env",
+    warnings.length === 0);
+}
+
+document.getElementById("grant").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    stream.getTracks().forEach(track => track.stop());
+    setStatus("Permission granted. Click Capture.", true);
+  } catch (error) {
+    setStatus(`Permission denied or no device: ${error.message}. ` +
+              `Device labels will be empty.`, false);
+  }
+});
+
+document.getElementById("capture").addEventListener("click", capture);
+
+document.getElementById("copy").addEventListener("click", async () => {
+  if (!outEl.value) { setStatus("Nothing captured yet.", false); return; }
+  try {
+    await navigator.clipboard.writeText(outEl.value);
+    setStatus("Copied.", true);
+  } catch {
+    outEl.select();
+    setStatus("Clipboard blocked — the text is selected, copy it manually.", false);
+  }
+});
+</script>
+</body>
+</html>
