@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>env-chromium-patch verification</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 14px/1.5 system-ui, sans-serif;
+    margin: 0 auto; padding: 2rem 1.5rem; max-width: 60rem;
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
+  p.lede { margin: 0 0 1.5rem; opacity: .75; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: .5rem; }
+  th, td {
+    text-align: left; padding: .4rem .6rem; vertical-align: top;
+    border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  }
+  th { width: 16rem; font-weight: 600; }
+  td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+       word-break: break-word; }
+  .wrap { overflow-x: auto; }
+  .check { padding: .5rem .75rem; margin: .35rem 0; border-radius: 4px;
+           border-left: 3px solid; }
+  .pass { border-color: #2e7d32; background: color-mix(in srgb, #2e7d32 8%, transparent); }
+  .fail { border-color: #c62828; background: color-mix(in srgb, #c62828 10%, transparent); }
+  .info { border-color: #757575; background: color-mix(in srgb, #757575 8%, transparent); }
+  button { font: inherit; padding: .4rem .8rem; margin-bottom: .5rem; }
+  .muted { opacity: .6; }
+</style>
+</head>
+<body>
+
+<h1>env-chromium-patch verification</h1>
+<p class="lede">
+  Every value the patch can override, plus the consistency checks that catch the
+  mistakes which are easy to make. Run this once with no environment variables
+  set — everything should report stock values — and again with your profile.
+</p>
+
+<h2>Consistency checks</h2>
+<div id="checks"></div>
+
+<h2>Navigator</h2>
+<div class="wrap"><table id="navigator"></table></div>
+
+<h2>User agent client hints</h2>
+<div class="wrap"><table id="hints"></table></div>
+
+<h2>WebGL</h2>
+<div class="wrap"><table id="webgl"></table></div>
+
+<h2>WebGPU</h2>
+<div class="wrap"><table id="webgpu"></table></div>
+
+<h2>Worker scope</h2>
+<p class="muted">
+  Verifies the override was applied at <code>NavigatorBase</code> rather than
+  <code>Navigator</code>; the latter would leave workers reporting the real values.
+</p>
+<div class="wrap"><table id="worker"></table></div>
+
+<h2>Media devices</h2>
+<p class="muted">
+  Labels are empty until the page holds camera/microphone permission, matching
+  unpatched Chrome. Device IDs are per-origin HMACs, so they will not match the
+  strings in your JSON.
+</p>
+<button id="grant">Request camera + microphone permission</button>
+<div class="wrap"><table id="devices"></table></div>
+
+<script>
+const rows = (table, pairs) => {
+  document.getElementById(table).innerHTML = pairs
+    .map(([k, v]) => `<tr><th>${k}</th><td>${escapeHtml(String(v))}</td></tr>`)
+    .join("");
+};
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+const checks = [];
+const check = (ok, label, detail) =>
+  checks.push({ ok, label, detail });
+
+function renderChecks() {
+  document.getElementById("checks").innerHTML = checks.map(c => {
+    const cls = c.ok === null ? "info" : c.ok ? "pass" : "fail";
+    const mark = c.ok === null ? "—" : c.ok ? "PASS" : "FAIL";
+    return `<div class="check ${cls}"><strong>${mark}</strong> ${escapeHtml(c.label)}` +
+           (c.detail ? `<br><span class="muted">${escapeHtml(c.detail)}</span>` : "") +
+           `</div>`;
+  }).join("");
+}
+
+// --- navigator ------------------------------------------------------------
+rows("navigator", [
+  ["userAgent", navigator.userAgent],
+  ["appVersion", navigator.appVersion],
+  ["platform", navigator.platform],
+  ["vendor", navigator.vendor],
+  ["hardwareConcurrency", navigator.hardwareConcurrency],
+  ["deviceMemory", navigator.deviceMemory ?? "(not exposed)"],
+]);
+
+// --- webgl ----------------------------------------------------------------
+function readWebgl(contextName) {
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext(contextName);
+  if (!gl) return null;
+  const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    vendor: gl.getParameter(gl.VENDOR),
+    renderer: gl.getParameter(gl.RENDERER),
+    version: gl.getParameter(gl.VERSION),
+    glsl: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+    unmaskedVendor: debugInfo
+      ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : "(extension unavailable)",
+    unmaskedRenderer: debugInfo
+      ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : "(extension unavailable)",
+  };
+}
+
+const gl1 = readWebgl("webgl");
+const gl2 = readWebgl("webgl2");
+const webglRows = [];
+for (const [name, data] of [["WebGL 1", gl1], ["WebGL 2", gl2]]) {
+  if (!data) { webglRows.push([`${name}`, "(unavailable)"]); continue; }
+  webglRows.push(
+    [`${name} VENDOR (masked)`, data.vendor],
+    [`${name} RENDERER (masked)`, data.renderer],
+    [`${name} UNMASKED_VENDOR_WEBGL`, data.unmaskedVendor],
+    [`${name} UNMASKED_RENDERER_WEBGL`, data.unmaskedRenderer],
+    [`${name} VERSION`, data.version],
+    [`${name} SHADING_LANGUAGE_VERSION`, data.glsl],
+  );
+}
+rows("webgl", webglRows);
+
+// The masked values are constants in stock Chrome; if they ever change, the
+// patch has overreached and made the build *more* distinctive.
+if (gl1) {
+  check(gl1.vendor === "WebKit" && gl1.renderer === "WebKit WebGL",
+        "Masked GL_VENDOR/GL_RENDERER still report the stock constants",
+        `VENDOR=${gl1.vendor}  RENDERER=${gl1.renderer}`);
+}
+
+// --- client hints ---------------------------------------------------------
+async function reportHints() {
+  if (!navigator.userAgentData) {
+    rows("hints", [["userAgentData", "(unavailable — non-Chromium or insecure context)"]]);
+    return;
+  }
+  const high = await navigator.userAgentData.getHighEntropyValues([
+    "platform", "platformVersion", "architecture", "bitness",
+    "model", "uaFullVersion", "fullVersionList",
+  ]);
+  const brands = navigator.userAgentData.brands
+    .map(b => `${b.brand} ${b.version}`).join(", ");
+  const fullList = (high.fullVersionList || [])
+    .map(b => `${b.brand} ${b.version}`).join(", ");
+
+  rows("hints", [
+    ["brands", brands],
+    ["mobile", navigator.userAgentData.mobile],
+    ["platform", high.platform],
+    ["platformVersion", high.platformVersion],
+    ["architecture", high.architecture],
+    ["bitness", high.bitness],
+    ["uaFullVersion", high.uaFullVersion],
+    ["fullVersionList", fullList],
+  ]);
+
+  // Blank hints alongside a full UA string is the failure mode of reusing
+  // Chromium's --user-agent behaviour; it is more identifying than no spoof.
+  check(brands.length > 0 && high.platform !== "",
+        "Client hints are populated (not blanked)",
+        `platform="${high.platform}" brands="${brands}"`);
+
+  // navigator.platform and UA-CH platform use different vocabularies, so
+  // compare through the same mapping the patch uses.
+  const mapping = {
+    "Win32": "Windows", "MacIntel": "macOS", "Linux x86_64": "Linux",
+    "Linux i686": "Linux", "Linux armv81": "Android",
+    "iPhone": "iOS", "iPad": "iOS",
+  };
+  const expected = mapping[navigator.platform];
+  check(expected === undefined ? null : expected === high.platform,
+        "navigator.platform agrees with userAgentData.platform",
+        `platform="${navigator.platform}" implies "${expected}", hints say "${high.platform}"`);
+
+  // The UA string's Chrome version must match what Sec-CH-UA advertises.
+  const uaVersion = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
+  const brandVersion = navigator.userAgentData.brands
+    .filter(b => /Chrom/i.test(b.brand)).map(b => b.version)[0];
+  check(uaVersion && brandVersion ? uaVersion === brandVersion : null,
+        "UA string version matches the Sec-CH-UA brand version",
+        `UA says ${uaVersion}, brands say ${brandVersion}`);
+
+  renderChecks();
+}
+
+// --- webgpu ---------------------------------------------------------------
+async function reportWebgpu() {
+  if (!navigator.gpu) {
+    rows("webgpu", [["navigator.gpu", "(unavailable)"]]);
+    return;
+  }
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { rows("webgpu", [["adapter", "(none returned)"]]); return; }
+    const info = adapter.info || await adapter.requestAdapterInfo?.();
+    rows("webgpu", [
+      ["vendor", info?.vendor ?? "(empty)"],
+      ["architecture", info?.architecture ?? "(empty)"],
+      ["device", info?.device || "(empty — needs WebGPU developer features)"],
+      ["description", info?.description || "(empty — needs WebGPU developer features)"],
+    ]);
+  } catch (error) {
+    rows("webgpu", [["error", error.message]]);
+  }
+}
+
+// --- worker ---------------------------------------------------------------
+function reportWorker() {
+  const source = `self.onmessage = () => {
+    postMessage({
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      hardwareConcurrency: navigator.hardwareConcurrency,
+      vendorPresent: "vendor" in navigator,
+    });
+  };`;
+  let worker;
+  try {
+    worker = new Worker(URL.createObjectURL(
+      new Blob([source], { type: "text/javascript" })));
+  } catch (error) {
+    rows("worker", [["error", error.message]]);
+    check(null, "Worker scope could not be tested", error.message);
+    renderChecks();
+    return;
+  }
+  worker.onmessage = event => {
+    const data = event.data;
+    rows("worker", [
+      ["userAgent", data.userAgent],
+      ["platform", data.platform],
+      ["hardwareConcurrency", data.hardwareConcurrency],
+    ]);
+    check(data.platform === navigator.platform &&
+          data.hardwareConcurrency === navigator.hardwareConcurrency &&
+          data.userAgent === navigator.userAgent,
+          "Worker scope reports the same values as the main thread",
+          `worker platform="${data.platform}" concurrency=${data.hardwareConcurrency}`);
+    renderChecks();
+    worker.terminate();
+  };
+  worker.postMessage("go");
+}
+
+// --- media devices --------------------------------------------------------
+async function reportDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    rows("devices", [["mediaDevices", "(unavailable — needs a secure context)"]]);
+    return;
+  }
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    if (!devices.length) { rows("devices", [["(none)", ""]]); return; }
+    document.getElementById("devices").innerHTML =
+      `<tr><th>kind</th><td>label / deviceId / groupId</td></tr>` +
+      devices.map(d =>
+        `<tr><th>${escapeHtml(d.kind)}</th><td>` +
+        `${escapeHtml(d.label || "(label hidden — no permission)")}<br>` +
+        `<span class="muted">id ${escapeHtml(d.deviceId || "(empty)")}<br>` +
+        `group ${escapeHtml(d.groupId || "(empty)")}</span></td></tr>`
+      ).join("");
+  } catch (error) {
+    rows("devices", [["error", error.message]]);
+  }
+}
+
+document.getElementById("grant").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    stream.getTracks().forEach(track => track.stop());
+  } catch (error) {
+    // Expected when the spoofed devices have no hardware behind them; the
+    // permission grant itself is what matters for label visibility.
+    console.warn("getUserMedia failed:", error.message);
+  }
+  reportDevices();
+});
+
+// --- appVersion leak check ------------------------------------------------
+check(!/Chrome\/\d+/.test(navigator.appVersion) ||
+      navigator.userAgent.includes(navigator.appVersion),
+      "navigator.appVersion is derived from the (possibly spoofed) userAgent",
+      navigator.appVersion);
+
+renderChecks();
+reportHints();
+reportWebgpu();
+reportWorker();
+reportDevices();
+</script>
+</body>
+</html>
