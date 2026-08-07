@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Refresh clock adversarial harness</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0 auto;
+         padding: 2rem 1.5rem; max-width: 62rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
+  p.lede { margin: 0 0 1rem; opacity: .75; }
+  button { font: inherit; padding: .45rem .9rem; margin: 0 .4rem .5rem 0; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: .5rem; }
+  th, td { text-align: left; padding: .35rem .6rem;
+           border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+  th { width: 22rem; font-weight: 600; }
+  td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .note { padding: .6rem .8rem; border-left: 3px solid; border-radius: 4px;
+          margin: .75rem 0; }
+  .warn { border-color: #ef6c00; background: color-mix(in srgb, #ef6c00 10%, transparent); }
+  .ok   { border-color: #2e7d32; background: color-mix(in srgb, #2e7d32 8%, transparent); }
+  .info { border-color: #757575; background: color-mix(in srgb, #757575 8%, transparent); }
+  textarea { width: 100%; height: 12rem; font-family: ui-monospace, Menlo, monospace;
+             font-size: 11px; box-sizing: border-box; }
+  canvas { border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+           max-width: 100%; }
+  .muted { opacity: .65; }
+</style>
+</head>
+<body>
+
+<h1>Refresh clock adversarial harness</h1>
+<p class="lede">
+  Runs the checks in PRD section 22 against this build and reports, for each,
+  whether the model holds or breaks. Breaks are the result, not a defect.
+</p>
+
+<div id="resolution"></div>
+
+<button id="run">Run all checks (about 60 s)</button>
+<button id="export">Export interval trace</button>
+
+<h2>1. Timestamp resolution</h2>
+<div class="wrap"><table id="res-table"></table></div>
+
+<h2>2. Cadence, idle</h2>
+<div class="wrap"><table id="idle-table"></table></div>
+
+<h2>3. Load coupling (PRD 22.1)</h2>
+<p class="muted">Compares cadence statistics under light and heavy main-thread
+render load. Real hardware perturbs under load; a free-running clock does not.</p>
+<div class="wrap"><table id="load-table"></table></div>
+
+<h2>4. Drop clustering (PRD 22.2)</h2>
+<div class="wrap"><table id="drop-table"></table></div>
+
+<h2>5. rAF vs performance.now() (PRD 22.3)</h2>
+<p class="muted">Reads performance.now() at the top of the callback and subtracts
+the rAF timestamp argument. This design moves the rAF timestamp while now()
+stays real, so the delta may expose the injected jitter directly. The PRD
+expects this to be the strongest single detector.</p>
+<div class="wrap"><table id="delta-table"></table></div>
+
+<h2>Interval histogram</h2>
+<canvas id="hist" width="920" height="220"></canvas>
+
+<h2>Trace export</h2>
+<p class="muted">Paste into a file and run
+<code>python3 tools/analyze-intervals.py trace.txt --expect-hz 60 --observed</code>.</p>
+<textarea id="trace" spellcheck="false" placeholder="Run the checks, then Export."></textarea>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const rows = (id, pairs) => {
+  $(id).innerHTML = pairs.map(([k, v]) =>
+    `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join("");
+};
+
+const mean = v => v.reduce((a, b) => a + b, 0) / v.length;
+const sd = v => { const m = mean(v);
+  return Math.sqrt(v.reduce((a, x) => a + (x - m) ** 2, 0) / (v.length - 1)); };
+const median = v => { const s = [...v].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)]; };
+function autocorr(v, lag) {
+  const m = mean(v);
+  let num = 0, den = 0;
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i] - m; den += c * c;
+    if (i + lag < v.length) num += c * (v[i + lag] - m);
+  }
+  return den ? num / den : 0;
+}
+
+// The rAF timestamp is coarsened by blink::TimeClamper: 100 us normally, 5 us
+// when the page is cross-origin isolated. The injected jitter here has a
+// standard deviation around 0.06 ms, i.e. below one 100 us bucket -- so
+// without cross-origin isolation it is not resolvable on any single frame,
+// only statistically across many.
+function reportResolution() {
+  const isolated = self.crossOriginIsolated === true;
+  const quantum = isolated ? 0.005 : 0.1;
+  rows("res-table", [
+    ["crossOriginIsolated", isolated],
+    ["rAF timestamp quantum", `${quantum} ms`],
+    ["injected jitter (design sigma)", "~0.06 ms"],
+    ["jitter / quantum", (0.06 / quantum).toFixed(2)],
+  ]);
+  $("resolution").innerHTML = isolated
+    ? `<div class="note ok">Cross-origin isolated: rAF timestamps are quantised
+       to 5 us, so the injected jitter is resolvable per frame.</div>`
+    : `<div class="note warn"><strong>Not cross-origin isolated.</strong>
+       rAF timestamps are quantised to 100 us, which is larger than the
+       injected jitter's standard deviation. Per-frame values will look
+       heavily discretised and the measured standard deviation will be
+       dominated by quantisation, not by the model. Serve this page with
+       <code>Cross-Origin-Opener-Policy: same-origin</code> and
+       <code>Cross-Origin-Embedder-Policy: require-corp</code> to get 5 us
+       resolution before drawing conclusions.</div>`;
+}
+
+// Collects `count` frames, optionally burning `burnMs` of main-thread time in
+// each callback to create render load.
+function collect(count, burnMs = 0) {
+  return new Promise(resolve => {
+    const intervals = [], deltas = [];
+    let previous = null, n = 0;
+    function frame(rafTimestamp) {
+      const nowAtCallback = performance.now();
+      deltas.push(nowAtCallback - rafTimestamp);
+      if (previous !== null) intervals.push(rafTimestamp - previous);
+      previous = rafTimestamp;
+      if (burnMs > 0) {
+        const until = performance.now() + burnMs;
+        // Deliberate busy-wait: the point is to occupy the main thread.
+        while (performance.now() < until) { /* spin */ }
+      }
+      if (++n < count) requestAnimationFrame(frame);
+      else resolve({ intervals, deltas });
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+function summarise(intervals) {
+  const base = median(intervals);
+  const jitter = intervals.filter(v => v < base * 1.5);
+  const drops = intervals.filter(v => v >= base * 1.5);
+  return { base, jitter, drops, mean: mean(jitter), sd: sd(jitter),
+           hz: 1000 / mean(intervals), n: intervals.length };
+}
+
+// Longest run of consecutive dropped frames, and how many runs of >= 2.
+function burstStats(intervals, base) {
+  let run = 0, longest = 0, bursts = 0;
+  for (const v of intervals) {
+    if (v >= base * 1.5) { run++; longest = Math.max(longest, run);
+                           if (run === 2) bursts++; }
+    else run = 0;
+  }
+  return { longest, bursts };
+}
+
+function drawHistogram(intervals) {
+  const c = $("hist"), ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  const base = median(intervals);
+  const data = intervals.filter(v => v < base * 1.5);
+  const lo = Math.min(...data), hi = Math.max(...data);
+  const bins = 120, counts = new Array(bins).fill(0);
+  for (const v of data) {
+    const i = Math.min(bins - 1, Math.floor((v - lo) / (hi - lo) * bins));
+    counts[i]++;
+  }
+  const peak = Math.max(...counts);
+  const style = getComputedStyle(document.body).color;
+  ctx.fillStyle = style;
+  counts.forEach((n, i) => {
+    const h = (n / peak) * (c.height - 30);
+    ctx.fillRect(i * (c.width / bins), c.height - 20 - h,
+                 c.width / bins - 1, h);
+  });
+  ctx.font = "11px system-ui";
+  ctx.fillText(`${lo.toFixed(3)} ms`, 2, c.height - 6);
+  ctx.fillText(`${hi.toFixed(3)} ms`, c.width - 60, c.height - 6);
+}
+
+let lastTrace = [];
+
+async function runAll() {
+  $("run").disabled = true;
+  $("run").textContent = "Running…";
+
+  reportResolution();
+
+  // --- idle cadence ---
+  const idle = await collect(1200);
+  const s = summarise(idle.intervals);
+  lastTrace = idle.intervals;
+  const uniqueValues = new Set(idle.intervals.map(v => v.toFixed(4))).size;
+  rows("idle-table", [
+    ["frames", s.n],
+    ["mean interval", `${s.mean.toFixed(5)} ms`],
+    ["implied refresh", `${s.hz.toFixed(4)} Hz`],
+    ["stddev (drops excluded)", `${s.sd.toFixed(5)} ms`],
+    ["distinct interval values", `${uniqueValues} of ${s.n}`],
+    ["autocorrelation lag-1", autocorr(idle.intervals, 1).toFixed(4)],
+    ["autocorrelation lag-10", autocorr(idle.intervals, 10).toFixed(4)],
+    // PRD 22.5: an exactly-60.000 Hz mean is itself a signature. Real panels
+    // sit at values like 59.94.
+    ["PRD 22.5 exactly 60.000 Hz?",
+     Math.abs(s.hz - 60) < 0.001 ? "YES -- suspicious" : "no"],
+  ]);
+  drawHistogram(idle.intervals);
+
+  // --- load coupling (22.1) ---
+  const light = summarise((await collect(600, 0)).intervals);
+  const heavy = summarise((await collect(600, 11)).intervals);
+  const sdRatio = heavy.sd / light.sd;
+  rows("load-table", [
+    ["light load: mean / sd",
+     `${light.mean.toFixed(4)} / ${light.sd.toFixed(4)} ms`],
+    ["heavy load: mean / sd",
+     `${heavy.mean.toFixed(4)} / ${heavy.sd.toFixed(4)} ms`],
+    ["sd ratio (heavy / light)", sdRatio.toFixed(3)],
+    ["verdict", sdRatio > 1.5
+      ? "cadence responds to load"
+      : "cadence barely responds -- MODEL BREAKS HERE (expected)"],
+  ]);
+
+  // --- drop clustering (22.2) ---
+  const lightBursts = burstStats(light.jitter.length ? (await collect(600, 0)).intervals : [], light.base);
+  const heavyRun = (await collect(900, 13)).intervals;
+  const heavyBursts = burstStats(heavyRun, median(heavyRun));
+  const heavyDrops = heavyRun.filter(v => v >= median(heavyRun) * 1.5).length;
+  rows("drop-table", [
+    ["drops under heavy load", `${heavyDrops} of ${heavyRun.length}`],
+    ["longest consecutive run", heavyBursts.longest],
+    ["runs of >= 2", heavyBursts.bursts],
+    ["verdict", heavyBursts.bursts > 0
+      ? "drops cluster"
+      : "no clustering observed at this load"],
+  ]);
+
+  // --- rAF vs performance.now (22.3) ---
+  const d = idle.deltas;
+  const dm = mean(d), dsd = sd(d);
+  rows("delta-table", [
+    ["mean (now - rAF timestamp)", `${dm.toFixed(5)} ms`],
+    ["stddev of that delta", `${dsd.toFixed(5)} ms`],
+    ["correlation with interval",
+     (() => {
+       const n = Math.min(d.length - 1, idle.intervals.length);
+       const a = idle.intervals.slice(0, n), b = d.slice(1, n + 1);
+       const ma = mean(a), mb = mean(b);
+       let cov = 0;
+       for (let i = 0; i < n; i++) cov += (a[i] - ma) * (b[i] - mb);
+       return ((cov / n) / (sd(a) * sd(b))).toFixed(4);
+     })()],
+    ["verdict", dsd > 0.5
+      ? "delta is dominated by real scheduler jitter, which masks the model"
+      : "delta is tight -- injected jitter may be visible here"],
+  ]);
+
+  $("run").textContent = "Run all checks (about 60 s)";
+  $("run").disabled = false;
+}
+
+$("run").addEventListener("click", runAll);
+$("export").addEventListener("click", () => {
+  $("trace").value = "# observed rAF intervals, ms\n" +
+    lastTrace.map(v => v.toFixed(6)).join("\n") + "\n";
+  $("trace").select();
+});
+
+reportResolution();
+</script>
+</body>
+</html>

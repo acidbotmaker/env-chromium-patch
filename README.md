@@ -258,11 +258,34 @@ edits/webgl.py        WebGL renderer/vendor/version
 edits/webgpu.py       GPUAdapterInfo
 edits/media.py        enumerateDevices
 edits/propagate.py    browser to child-process switch forwarding
+edits/refresh_clock.py  human-like BeginFrame timing (see docs/refresh-clock.md)
+src/                  whole files copied into the tree
+tools/                trace analysis
+docs/                 design notes and measured limitations
 env.example           a coherent Windows/NVIDIA profile
 test/fingerprint.html verification page
 test/capture-profile.html  build a profile from a real machine
+test/refresh-clock.html    adversarial harness for the refresh clock
 test/serve.py         serve the test pages and log the identity headers
 ```
+
+## Refresh clock
+
+A second, independent feature lives in the same applier: a seed-driven timing
+model that replaces Chromium's perfectly periodic BeginFrame schedule with one
+whose statistics resemble a real compositor delivery path. It is off unless
+`CHROME_ENV_REFRESH_CLOCK=1` is set, and it changes no web-facing API directly —
+only the compositor's frame scheduling.
+
+See **[docs/refresh-clock.md](docs/refresh-clock.md)** for the design, the
+measured validation results, and — importantly — the checks that break it.
+Two findings worth knowing before using it:
+
+* The rAF timestamp Blink exposes is quantised to 100 µs unless the page is
+  cross-origin isolated, which is *larger* than the injected jitter. Measure
+  cross-origin isolated or you are measuring the quantiser.
+* Cadence variance does not respond to render load, only the drop rate does.
+  A load-coupling detector separates this model from real hardware.
 
 ## Building an accurate profile
 

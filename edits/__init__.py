@@ -29,6 +29,61 @@ class Edit:
     why: str = ""
 
 
+@dataclass(frozen=True)
+class NewFile:
+    """A whole file copied into the tree.
+
+    ``path`` is relative to the Chromium source root; the content comes from
+    ``src/<path>`` in this repo. Content is templated before writing (see
+    ``render``) so it can adapt to base/ APIs that were renamed recently.
+    """
+
+    path: str
+
+    @property
+    def repo_path(self) -> str:
+        return f"src/{self.path}"
+
+
+# base::Environment::GetVar changed from an out-param to std::optional. New
+# files carry a placeholder so they compile against either.
+ENV_GETVAR_TOKEN = "@ENV_GETVAR@"
+
+# GetVar takes base::cstring_view, which converts from a string literal array
+# or a std::string but NOT from a decayed `const char*` -- and by the time the
+# name reaches this helper it is a pointer parameter. Wrapping in std::string
+# picks the constructor that exists, and also compiles against the older
+# std::string_view overload. The temporary lives for the full call expression
+# and GetVar returns an owning optional, so there is nothing to dangle.
+ENV_GETVAR_OPTIONAL = """base::Environment environment;
+  std::optional<std::string> value = environment.GetVar(std::string(env_name));
+  if (value.has_value() && !value->empty()) {
+    return value;
+  }"""
+
+ENV_GETVAR_OUTPARAM = """std::unique_ptr<base::Environment> environment(
+      base::Environment::Create());
+  std::string value;
+  if (environment->GetVar(env_name, &value) && !value.empty()) {
+    return value;
+  }"""
+
+
+def render(content: str, ctx: dict) -> str:
+    """Substitutes API-flavour placeholders in a new file's content.
+
+    Whole files get the same treatment as anchored replacements, so a new file
+    can be written against the canonical spellings regardless of which
+    milestone it lands on. Today's new files are viz/browser-side and contain
+    no WTF String calls, but a Blink file added later would need this.
+    """
+    content = content.replace(
+        ENV_GETVAR_TOKEN,
+        ENV_GETVAR_OPTIONAL if ctx["optional_getvar"] else ENV_GETVAR_OUTPARAM,
+    )
+    return spell_from_utf8(content, ctx)
+
+
 MARKER_PREFIX = "ENV_FP"
 
 
@@ -108,10 +163,17 @@ def spell_from_utf8(text: str, ctx: dict) -> str:
 
 def collect_edits(ctx: dict) -> list:
     from . import shared, ua, navigator, webgl, webgpu, media, propagate
+    from . import refresh_clock
 
     out = []
-    for module in (shared, ua, navigator, webgl, webgpu, media, propagate):
+    for module in (shared, ua, navigator, webgl, webgpu, media, propagate,
+                   refresh_clock):
         for edit in module.edits(ctx):
+            # A NewFile has no replacement or marker to rewrite; its content is
+            # templated at write time by render() instead.
+            if isinstance(edit, NewFile):
+                out.append(edit)
+                continue
             out.append(dataclasses.replace(
                 edit,
                 replacement=spell_from_utf8(edit.replacement, ctx),

@@ -19,9 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from edits import collect_edits, detect_api_flavors
+from edits import NewFile, collect_edits, detect_api_flavors, render
 
 BACKUP_SUFFIX = ".env-fp.orig"
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 def fail(message: str) -> None:
@@ -54,6 +55,17 @@ def revert(src: Path) -> int:
         backup.unlink()
         print(f"  restored {target.relative_to(src)}")
         restored += 1
+
+    # Files this patch introduced have no backup to restore, so remove them.
+    for edit in collect_edits(detect_api_flavors(src)):
+        if not isinstance(edit, NewFile):
+            continue
+        target = src / edit.path
+        if target.exists():
+            target.unlink()
+            print(f"  removed {edit.path}")
+            restored += 1
+
     if not restored:
         print("No backups found; nothing to revert.")
     return restored
@@ -105,8 +117,22 @@ def main() -> int:
     planned: list = []
     already: list = []
     errors: list = []
+    new_files: list = []
 
     for edit in edits:
+        if isinstance(edit, NewFile):
+            source = REPO_ROOT / edit.repo_path
+            if not source.exists():
+                errors.append(f"{edit.path}: missing source file {edit.repo_path}")
+                continue
+            rendered = render(source.read_text(), ctx)
+            target = src / edit.path
+            if target.exists() and target.read_text() == rendered:
+                already.append(edit)
+            else:
+                new_files.append((edit.path, rendered))
+            continue
+
         path = src / edit.path
         if not path.exists():
             errors.append(f"{edit.path}: file not found")
@@ -144,9 +170,14 @@ def main() -> int:
 
     if already:
         print(f"\n{len(already)} edit(s) already applied, skipping.")
-    if not planned:
+    if not planned and not new_files:
         print("Nothing to do.")
         return 0
+
+    if new_files:
+        print(f"\n{len(new_files)} new file(s) to add:")
+        for path, _ in new_files:
+            print(f"  {path}")
 
     print(f"\n{len(planned)} edit(s) to apply across {len(set(e.path for e in planned))} file(s):")
     for edit in planned:
@@ -167,6 +198,16 @@ def main() -> int:
         return 0
 
     # Phase 2: write, backing up each original exactly once.
+    for rel, rendered in new_files:
+        target = src / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            backup = target.with_name(target.name + BACKUP_SUFFIX)
+            if not backup.exists():
+                backup.write_text(target.read_text())
+        target.write_text(rendered)
+        print(f"  added {rel}")
+
     for rel, new_text in sorted(contents.items()):
         path = src / rel
         original = path.read_text()
@@ -181,6 +222,13 @@ def main() -> int:
     print("\nApplied. Build with: autoninja -C out/Release chrome")
 
     if args.emit_patch:
+        # `git diff` ignores untracked files, so the new sources would be
+        # silently missing from the patch. Mark them intent-to-add first;
+        # that makes them show up as additions without staging content.
+        added_paths = [edit.path for edit in edits if isinstance(edit, NewFile)]
+        if added_paths:
+            subprocess.run(["git", "-C", str(src), "add", "-N", *added_paths],
+                           capture_output=True, text=True)
         result = subprocess.run(
             ["git", "-C", str(src), "diff"],
             capture_output=True, text=True,
