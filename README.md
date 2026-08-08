@@ -6,6 +6,10 @@ strings, WebGPU adapter info, and the `enumerateDevices()` result — can be set
 from environment variables at launch time. Anything you don't set keeps its
 stock value, so an unconfigured build behaves exactly like upstream Chromium.
 
+Standing up a build box from nothing — disks, depot_tools, fetching and pinning
+Chromium, building, and re-syncing later — is in
+**[00_setup/README.md](00_setup/README.md)**.
+
 ## Applying
 
 The patch is applied by a script rather than shipped as a unified diff. It was
